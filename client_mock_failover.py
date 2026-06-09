@@ -165,12 +165,18 @@ ultimo_tempo_atual = time.time()    # medição do tempo real  para medir o temp
 # --------------------------------------------------------------- #
 #           Loop Principal do ABR
 # --------------------------------------------------------------- #
-
+mock_failover = False
 def baixar_segmento(qualidade):
     global conexao
 
     # Requisição
     conexao.request("GET", f"/segment/{qualidade}")
+
+    # MOCK failover
+    global mock_failover
+    if mock_failover:
+        conexao.sock.close()
+
     response = conexao.getresponse()
 
     # Download e medição do tempo de download
@@ -207,6 +213,20 @@ for segmento in segmentos:
         response = conexao_health.getresponse()
         health = json.loads(response.read())
         conexao_health.close()
+
+        # Mock Failover curto
+        if segmento == 4 and tentativa == 0:
+            mock_failover = True
+
+        # MOCK Failover longo
+        elif segmento == 7 and tentativa == 0:
+            mock_failover = True
+            print(f"   MOCK: Servidor de prioridade {tentativa+1} caiu por um bom tempo...")
+        elif segmento > 7 and segmento <= 13 and tentativa == 0:
+            health["status"] = "naum"
+
+        else:
+            mock_failover = False
 
         if health["status"] != "ok":
             print(f"\tServidor de prioridade {tentativa+1} inacessível.")
