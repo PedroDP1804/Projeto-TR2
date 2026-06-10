@@ -12,11 +12,12 @@ from matplotlib.ticker import MaxNLocator
 # --------------------------------------------------------------- #
 
 config = {
-    "print_logs": True,                           # Logs da execução
+    "print_logs": True,                                 # Logs da execução
     "fator_de_seguranca": 0.85,                         # Fator de segurança pra escolha da qualidade
     "janela_da_media": 3,                               # Número de bitrates anteriores consideradas na média
     "num_segmentos": 20,                                # Número de segmentos a serem baixados na execução do programa
     "min_buffer_play": 3,                               # Mínimo de segundos em buffer para dar play
+    "min_buffer_subir": 8,                              # Valor do buffer em segundos para subir a qualidade
     "url_inicial": "137.131.178.229:8080",              # URL da conexão inicial
 }
 
@@ -43,7 +44,7 @@ print_log(json.dumps(manifesto, indent=3))
 with open("manifesto.json", "w", encoding="utf-8") as arquivo:
     json.dump(manifesto, arquivo, indent=3)
 
-representacoes = manifesto["representations"]
+representacoes = sorted(manifesto["representations"], key=lambda r: r["bitrate_kbps"])
 
 # <-------------------------------------------------------------> #
 
@@ -52,29 +53,24 @@ representacoes = manifesto["representations"]
 #               Funções
 # --------------------------------------------------------------- #
 
-# testa a bitrate na qualidade num_qualidade (na ordem do manifesto) e retorna a bitrate:int em kbps
-def teste_bitrate(num_qualidade: int) -> int:
 
-    qualidade = representacoes[num_qualidade]["quality"]
-    n_bytes = representacoes[num_qualidade]["segment_bytes"]
 
-    conexao.request("GET", f"/segment/{qualidade}")
-    response = conexao.getresponse()
+def escolher_qualidade(ref_rate: int, buffer:float) -> tuple[str, int]:
 
-    tempo_download = time.time()
-    response.read()
-    tempo_download = time.time() - tempo_download
+    global qualidades, bitrates
 
-    return (8 * n_bytes / tempo_download) // 1000
+    qualidade_escolhida = qualidades[0]
+    rate_escolhido = bitrates[0]
+    fator: float = config["fator_de_seguranca"]
 
-def escolher_qualidade(ref_rate: int) -> tuple[str, int]:
 
-    qualidade_escolhida: str = list(qualities_rates.values())[0]
-    rate_escolhido: int = list(qualities_rates.keys())[0]
-    fator_seguranca: float = config["fator_de_seguranca"]
+    fator_buffer = max(1, (buffer - config["min_buffer_subir"])) # minimo 1
+    print(f"\tMultiplicador de buffer: x{fator_buffer:4f}")
+
+    fator = fator * fator_buffer
 
     for rate, quality in qualities_rates.items():
-        if (ref_rate * fator_seguranca >= rate):
+        if (ref_rate * fator >= rate):
             qualidade_escolhida, rate_escolhido = quality, rate
 
     return (qualidade_escolhida, rate_escolhido)
@@ -86,31 +82,13 @@ def escolher_qualidade(ref_rate: int) -> tuple[str, int]:
 #           Inicialização
 # --------------------------------------------------------------- #
 
-# Setup do CSV
-csv_file = open("abr_log.csv", "w", newline="", encoding="utf-8")
-writer = csv.writer(csv_file)
-
-writer.writerow([
-    "segment",
-    "timestamp",
-    "server_id",
-    "quality",
-    "bitrate_kbps",
-    "vazao_kbps",
-    "download_time_s",
-    "jitter_network_ms",
-    "jitter_ewma_ms",
-    "buffer_level_s",
-    "buffer_can_play",
-    "rebuffer_event",
-    "stall_duration_s",
-    "failover_total",
-])
-
 # Mapeamento das qualidades e bitrates
 qualities_rates: dict[int, str] = {}
 for rep in representacoes:
     qualities_rates[rep["bitrate_kbps"]] = rep["quality"]
+
+bitrates = list(qualities_rates.keys())
+qualidades = list(qualities_rates.values())
 
 # Mapeamento dos servidores para failover
 servidores = [s for s in sorted(manifesto["servers"], key=lambda server: server["priority"])]
@@ -129,25 +107,51 @@ print_log(f"Servidores disponíveis: {servidores}")
 # --------------------------------------------------------------- #
 
 # Teste inicial de bitrate
+def teste_bitrate(num_qualidade: int) -> int:
+
+    qualidade = representacoes[num_qualidade]["quality"]
+    n_bytes = representacoes[num_qualidade]["segment_bytes"]
+
+    conexao.request("GET", f"/segment/{qualidade}")
+    response = conexao.getresponse()
+
+    tempo_download = time.time()
+    response.read()
+    tempo_download = time.time() - tempo_download
+
+    return (8 * n_bytes / tempo_download) // 1000
+
 bitrate_teste = teste_bitrate(0)
+
 print_log(f"Bitrate do teste: {bitrate_teste} kbps\n")
 
 # Parametros
 segundos_por_segmento:float = manifesto["segment_duration_s"]
 tamanho_janela_media = config["janela_da_media"]
 
-qualidade_atual = escolher_qualidade(bitrate_teste)
+qualidade_atual = escolher_qualidade(bitrate_teste, 0.0)
 vazao_media = bitrate_teste
 
 print_log(f"Primeira Qualidade | Bitrate escolhida: {qualidade_atual[0]} | {qualidade_atual[1]} kbps\n\n")
 
 # Logs
-logs = {
-    "vazao_atual": [],
-    "vazao_media": [],
-    "buffer": [],
-    "bitrate_escolhida": [],
+logs_csv = {
+    "segment": [],
+    "timestamp": [],
+    "server_id": [],
+    "quality": [],
+    "bitrate_kbps": [],
+    "vazao_kbps": [],
+    "download_time_s": [],
+    "jitter_network_ms": [],
+    "jitter_ewma_ms": [],
+    "buffer_level_s": [],
+    "buffer_can_play": [],
+    "rebuffer_event": [],
+    "stall_duration_s": [],
+    "failover_total": [],
 }
+logs_vazao_media = [] # p/ graficos
 
 # Estado
 index_servidor = 0                  # Index do servidor conectado atualmente (da lista de servidores)
@@ -174,9 +178,9 @@ def baixar_segmento(qualidade):
     response = conexao.getresponse()
 
     # Download e medição do tempo de download
-    tempo_download = time.time()
+    tempo_download = time.perf_counter() #maior precisão, tava dando div by 0
     dados = response.read()
-    tempo_download = time.time() - tempo_download
+    tempo_download = time.perf_counter() - tempo_download
 
     return (dados, tempo_download)
 
@@ -225,7 +229,7 @@ for segmento in segmentos:
 
         try:
 
-            qualidade, bitrate_escolhida = escolher_qualidade(vazao_media)
+            qualidade, bitrate_escolhida = escolher_qualidade(vazao_media, buffer)
             print_log(f"\tQualidade escolhida: {qualidade} | {bitrate_escolhida} kbps")
 
             dados, tempo_download = baixar_segmento(qualidade)
@@ -237,6 +241,7 @@ for segmento in segmentos:
 
             # Cálculo da média
             vazao_media = calcular_media(vazao_atual)
+            logs_vazao_media.append(vazao_media)
 
             print_log(f"\tVazão média: {vazao_media:.2f} kbps")
 
@@ -292,30 +297,21 @@ for segmento in segmentos:
             print_log(f"   Tentativa bem sucedida!\n")
             id_servidor = servidores[tentativa]["id"]
 
-            logs["bitrate_escolhida"].append(bitrate_escolhida)
-            logs["vazao_atual"].append(vazao_atual)
-            logs["vazao_media"].append(vazao_media)
-            logs["buffer"].append(buffer)
-
-            # Registrar no CSV
-            # TO-DO: implementar as métricas faltantes
             timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-            writer.writerow([
-                segmento,                           # "segment"
-                timestamp,                          # "timestamp"
-                servidores[index_servidor]["id"],   # "server_id"
-                qualidade,                          # "quality"
-                bitrate_escolhida,                  # "bitrate_kbps"
-                vazao_atual,                        # "vazao_kbps"
-                round(tempo_download, 4),           # "download_time_s"
-                "null",                             # "jitter_network_ms" #TO-DO
-                "null",                             # "jitter_ewma_ms" #TO-DO
-                buffer,                             # "buffer_level_s"
-                int(buffer_can_play),               # "buffer_can_play"
-                int(rebuffer_no_ultimo),            # "rebuffer_event"
-                tempo_rebuffer,                     # "stall_duration_s"
-                failover_total,                     # "failover_total"
-            ])
+            logs_csv["segment"].append(segmento)
+            logs_csv["timestamp"].append(timestamp)
+            logs_csv["server_id"].append(servidores[index_servidor]["id"])
+            logs_csv["quality"].append(qualidade)
+            logs_csv["bitrate_kbps"].append(bitrate_escolhida)
+            logs_csv["vazao_kbps"].append(vazao_atual)
+            logs_csv["download_time_s"].append(round(tempo_download, 4))
+            logs_csv["jitter_network_ms"].append("null") #TO-DO
+            logs_csv["jitter_ewma_ms"].append("null") #TO-DO
+            logs_csv["buffer_level_s"].append(buffer)
+            logs_csv["buffer_can_play"].append(int(buffer_can_play))
+            logs_csv["rebuffer_event"].append(int(rebuffer_no_ultimo))
+            logs_csv["stall_duration_s"].append(tempo_rebuffer)
+            logs_csv["failover_total"].append(failover_total)
 
             break
 
@@ -337,9 +333,28 @@ for segmento in segmentos:
 
 
 # <-------------------------------------------------------------> #
+conexao.close()
+
+
+# --------------------------------------------------------------- #
+#           Métricas CSV
+# --------------------------------------------------------------- #
+
+# TO-DO: implementar as métricas faltantes
+
+csv_file = open("metricas.csv", "w", newline="", encoding="utf-8")
+writer = csv.writer(csv_file)
+
+# headers
+writer.writerow(list(logs_csv.keys()))
+
+for i in segmentos:
+    linha = []
+    for coluna in logs_csv.values():
+        linha.append(coluna[i-1])
+    writer.writerow(linha)
 
 csv_file.close()
-conexao.close()
 
 
 # --------------------------------------------------------------- #
@@ -352,7 +367,7 @@ figura, graficos = mplot.subplots(nrows=2, ncols=2, figsize=(12, 5))
 graficos[0, 0].set_title("Vazão Instantânea (kbps)")
 graficos[0, 0].set_xlabel("Segmento")
 # graficos[0, 0].set_ylabel("kbps")
-graficos[0, 0].plot(segmentos, logs["vazao_atual"])
+graficos[0, 0].plot(segmentos, logs_csv["vazao_kbps"])
 graficos[0, 0].xaxis.set_major_locator(MaxNLocator(integer=True))
 graficos[0, 0].set_ylim(0, 3000)
 
@@ -364,16 +379,14 @@ cor_vazao = "tab:blue"
 graficos[0, 1].set_title("Vazão Média (kbps) e Qualidade")
 graficos[0, 1].set_xlabel("Segmento")
 # graficos[0, 1].set_ylabel("kbps")
-linha1 = graficos[0, 1].plot(segmentos, logs["vazao_media"], color=cor_vazao, label="Vazão Média")
+linha1 = graficos[0, 1].plot(segmentos, logs_vazao_media, color=cor_vazao, label="Vazão Média")
 graficos[0, 1].xaxis.set_major_locator(MaxNLocator(integer=True))
 
 # qualidade
 cor_qualidade = "tab:orange"
 eixo_qualidade = graficos[0, 1].twinx()
 # eixo_qualidade.set_ylabel("Qualidade")
-linha2 = eixo_qualidade.plot(segmentos, logs["bitrate_escolhida"], color=cor_qualidade, label="Qualidade")
-bitrates = list(qualities_rates.keys())
-qualidades = list(qualities_rates.values())
+linha2 = eixo_qualidade.plot(segmentos, logs_csv["bitrate_kbps"], color=cor_qualidade, label="Qualidade")
 eixo_qualidade.set_yticks(bitrates)
 eixo_qualidade.set_yticklabels(qualidades)
 
@@ -387,7 +400,7 @@ graficos[0, 1].legend(linhas, labels, loc='upper left')
 # Gráfico 3: Nível do buffer
 graficos[1, 0].set_title("Nível do Buffer (s)")
 graficos[1, 0].set_xlabel("Segmento")
-graficos[1, 0].plot(segmentos, logs["buffer"])
+graficos[1, 0].plot(segmentos, logs_csv["buffer_level_s"])
 graficos[1, 0].xaxis.set_major_locator(MaxNLocator(integer=True))
 
 #TO-DO
