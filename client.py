@@ -8,7 +8,7 @@ from matplotlib.ticker import MaxNLocator
 
 
 # --------------------------------------------------------------- #
-#           Config e Inicialização
+#           Config
 # --------------------------------------------------------------- #
 
 config = {
@@ -17,12 +17,9 @@ config = {
     "janela_da_media": 3,                               # Número de bitrates anteriores consideradas na média
     "num_segmentos": 20,                                # Número de segmentos a serem baixados na execução do programa
     "min_buffer_play": 3,                               # Mínimo de segundos em buffer para dar play
-    "min_buffer_subir": 8,                              # Valor do buffer em segundos para subir a qualidade
+    "min_buffer_subir": 10,                             # Valor do buffer em segundos para subir a qualidade
     "url_inicial": "137.131.178.229:8080",              # URL da conexão inicial
 }
-
-# inicia conexão
-conexao = http.client.HTTPConnection(config["url_inicial"])
 
 def print_log(msg:str):
     if config["print_logs"]:
@@ -34,6 +31,9 @@ def print_log(msg:str):
 # --------------------------------------------------------------- #
 #           GET do Manifesto
 # --------------------------------------------------------------- #
+
+# inicia conexão
+conexao = http.client.HTTPConnection(config["url_inicial"])
 
 conexao.request("GET", "/manifest")
 resposta = conexao.getresponse()
@@ -52,8 +52,6 @@ representacoes = sorted(manifesto["representations"], key=lambda r: r["bitrate_k
 # --------------------------------------------------------------- #
 #               Funções
 # --------------------------------------------------------------- #
-
-
 
 def escolher_qualidade(ref_rate: int, buffer:float) -> tuple[str, int]:
 
@@ -369,7 +367,8 @@ graficos[0, 0].set_xlabel("Segmento")
 # graficos[0, 0].set_ylabel("kbps")
 graficos[0, 0].plot(segmentos, logs_csv["vazao_kbps"])
 graficos[0, 0].xaxis.set_major_locator(MaxNLocator(integer=True))
-graficos[0, 0].set_ylim(0, 3000)
+lim = (  max(0, min(logs_csv["vazao_kbps"])-500),  max(logs_csv["vazao_kbps"]) + 500  )
+graficos[0, 0].set_ylim(lim)
 
 
 # Gráfico 2: Vazão Média e Qualidade
@@ -391,8 +390,10 @@ eixo_qualidade.set_yticks(bitrates)
 eixo_qualidade.set_yticklabels(qualidades)
 
 # junção
-graficos[0, 1].set_ylim(0, 3000)
-eixo_qualidade.set_ylim(0, 3000)
+lim = (  max(0, min(logs_csv["bitrate_kbps"])-500),  max(logs_csv["bitrate_kbps"]) + 500  )
+graficos[0, 1].set_ylim(lim)
+# lim = (  max(0, min(logs_csv["bitrate_kbps"])-500),  max(logs_csv["bitrate_kbps"]) + 500  )
+eixo_qualidade.set_ylim(lim)
 linhas = linha1 + linha2
 labels = [l.get_label() for l in linhas]
 graficos[0, 1].legend(linhas, labels, loc='upper left')
