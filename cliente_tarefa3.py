@@ -407,7 +407,6 @@ for segmento in segmentos:
                 print("<!> Sem servidores disponíveis. Encerrando...\n\n")
                 raise RuntimeError
 
-
 # <-------------------------------------------------------------> #
 conexao.close()
 
@@ -429,71 +428,3 @@ for i in segmentos:
     writer.writerow(linha)
 
 csv_file.close()
-
-
-# --------------------------------------------------------------- #
-#           Gráficos
-# --------------------------------------------------------------- #
-
-figura, graficos = mplot.subplots(nrows=1, ncols=3, figsize=(12, 8))
-
-# Gráfico 1: Vazão instantânea
-graficos[0].set_title("Vazão Instantânea (kbps)")
-graficos[0].set_xlabel("Segmento")
-graficos[0].plot(segmentos, logs_csv["vazao_kbps"])
-graficos[0].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-lim = (
-    max(0, min(logs_csv["vazao_kbps"]) - 500),
-    max(logs_csv["vazao_kbps"]) + 500
-)
-graficos[0].set_ylim(lim)
-
-# Gráfico 2: Vazão Média e Qualidade
-cor_vazao = "tab:blue"
-
-graficos[1].set_title("Vazão Média (kbps) e Qualidade")
-graficos[1].set_xlabel("Segmento")
-
-linha1 = graficos[1].plot(
-    segmentos,
-    logs_vazao_media,
-    color=cor_vazao,
-    label="Vazão Média"
-)
-
-graficos[1].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-cor_qualidade = "tab:orange"
-eixo_qualidade = graficos[1].twinx()
-
-linha2 = eixo_qualidade.plot(
-    segmentos,
-    logs_csv["bitrate_kbps"],
-    color=cor_qualidade,
-    label="Qualidade"
-)
-
-eixo_qualidade.set_yticks(bitrates)
-eixo_qualidade.set_yticklabels(qualidades)
-
-lim = (
-    max(0, min(logs_csv["bitrate_kbps"]) - 500),
-    max(logs_csv["bitrate_kbps"]) + 500
-)
-
-graficos[1].set_ylim(lim)
-eixo_qualidade.set_ylim(lim)
-
-linhas = linha1 + linha2
-labels = [l.get_label() for l in linhas]
-graficos[1].legend(linhas, labels, loc="upper left")
-
-# Gráfico 3: Nível do buffer
-graficos[2].set_title("Nível do Buffer (s)")
-graficos[2].set_xlabel("Segmento")
-graficos[2].plot(segmentos, logs_csv["buffer_level_s"])
-graficos[2].xaxis.set_major_locator(MaxNLocator(integer=True))
-
-mplot.tight_layout()
-mplot.show()

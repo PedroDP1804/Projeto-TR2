@@ -355,7 +355,7 @@ conexao.close()
 
 # TO-DO: implementar as métricas faltantes
 
-csv_file = open("metricas.csv", "w", newline="", encoding="utf-8")
+csv_file = open("metricas_tarefa2.csv", "w", newline="", encoding="utf-8")
 writer = csv.writer(csv_file)
 
 # headers
@@ -434,5 +434,5 @@ graficos[2].set_xlabel("Segmento")
 graficos[2].plot(segmentos, logs_csv["buffer_level_s"])
 graficos[2].xaxis.set_major_locator(MaxNLocator(integer=True))
 
-mplot.tight_layout()
-mplot.show()
+#mplot.tight_layout()
+#mplot.show()

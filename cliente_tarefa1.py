@@ -92,7 +92,7 @@ buffer = 8.0
 rebuffer_time = 0.0
 ultimo_tempo_baixar = None  # Para cálculo do Jitter
 
-csv_file = open("abr_log.csv", "w", newline="", encoding="utf-8")
+csv_file = open("metricas_tarefa1.csv", "w", newline="", encoding="utf-8")
 writer = csv.writer(csv_file)
 
 writer.writerow([
@@ -182,6 +182,7 @@ for segmento in range(20):
 csv_file.close()
 conexao.close()
 
+'''
 plt.figure(figsize=(12, 5))
 
 plt.subplot(1, 2, 1)
@@ -201,4 +202,4 @@ plt.ylabel("Bitrate (kbps)")
 plt.grid(True)
 
 plt.tight_layout()
-plt.show()
+plt.show()'''
