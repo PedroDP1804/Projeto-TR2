@@ -3,39 +3,37 @@ from http.client import HTTPException
 import json
 import time
 import csv
-import matplotlib.pyplot as mplot
-from matplotlib.ticker import MaxNLocator
 
 
 # --------------------------------------------------------------- #
-#           Config
+#           Configurações Globais (Atualizadas p/ Entrega 2)
 # --------------------------------------------------------------- #
 
 config = {
-    "print_logs": True,                                 # Logs da execução
-    "fator_de_seguranca": 0.85,                         # Fator de segurança pra escolha da qualidade
-    "janela_da_media": 3,                               # Número de bitrates anteriores consideradas na média
-    "num_segmentos": 20,                                # Número de segmentos a serem baixados na execução do programa
-    "min_buffer_play": 3,                               # Mínimo de segundos em buffer para dar play
-    "min_buffer_subir": 10,                             # Valor do buffer em segundos para subir a qualidade
-    "url_inicial": "137.131.178.229:8080",              # URL da conexão inicial
-    "alpha_ewma": 0.125                                 # Constante de suavização do Jitter
+    "print_logs": True,
+    "fator_de_seguranca": 0.92,                         # Atualizado conforme feedback (0.92 para priorizar 720p/1080p)
+    "janela_da_media": 3,
+    "num_segmentos": 20,
+    
+    # NOVOS LIMITES DE BUFFER DA ENTREGA 2
+    "buffer_max_s": 30.0,                               # Teto absoluto do buffer
+    "buffer_target_s": 15.0,                            # Nível desejado (onde o sleep começa a atuar)
+    "buffer_min_s": 4.0,                                # Abaixo disso, entra em modo de emergência
+    
+    "url_inicial": "137.131.178.229:8080",
+    "alpha_ewma": 0.125
 }
 
 def print_log(msg:str):
     if config["print_logs"]:
         print(msg)
 
-# <-------------------------------------------------------------> #
-
 
 # --------------------------------------------------------------- #
 #           GET do Manifesto
 # --------------------------------------------------------------- #
 
-# inicia conexão
 conexao = http.client.HTTPConnection(config["url_inicial"])
-
 conexao.request("GET", "/manifest")
 resposta = conexao.getresponse()
 manifesto: dict[str] = json.loads(resposta.read())
@@ -47,73 +45,65 @@ with open("manifesto.json", "w", encoding="utf-8") as arquivo:
 
 representacoes = sorted(manifesto["representations"], key=lambda r: r["bitrate_kbps"])
 
-# <-------------------------------------------------------------> #
-
 
 # --------------------------------------------------------------- #
-#               Funções
+#               Funções de Inteligência ABR
 # --------------------------------------------------------------- #
-
-def escolher_qualidade(ref_rate: int, buffer: float, tendencia: float, jitter_suavizado: float) -> tuple[str, int]:
-
-    global qualidades, bitrates
-
-    qualidade_escolhida = qualidades[0]
-    rate_escolhido = bitrates[0]
-    fator: float = config["fator_de_seguranca"]
-
-    fator_buffer = max(1, (buffer - config["min_buffer_subir"])) # minimo 1
-    print_log(f"\tMultiplicador de buffer: x{fator_buffer:.4f}")
-
-    fator = fator * fator_buffer
-
-    # Penalidade por Tendência (Regressão Linear)
-    if tendencia < -100.0:
-        print_log("\tTendência de queda brusca. Penalidade de 20%.")
-        fator *= 0.80
-    elif tendencia < -10.0:
-        print_log("\tTendência de queda. Penalidade de 10%.")
-        fator *= 0.90
-        
-    # Penalidade por Jitter (EWMA)
-    if jitter_suavizado > 100.0:
-        print_log(f"\tJitter alto ({jitter_suavizado:.2f}ms). Penalidade de 25%.")
-        fator *= 0.75
-
-    for rate, quality in qualities_rates.items():
-        if (ref_rate * fator >= rate):
-            qualidade_escolhida, rate_escolhido = quality, rate
-
-    return (qualidade_escolhida, rate_escolhido)
-
 
 def calcular_tendencia(vazoes: list) -> float:
     n = len(vazoes)
     if n < 2:
         return 0.0
-    
     x = list(range(1, n + 1))
-    y = vazoes
-    
-    sum_x = sum(x)
-    sum_y = sum(y)
-    sum_xy = sum(i * j for i, j in zip(x, y))
+    sum_x, sum_y = sum(x), sum(vazoes)
+    sum_xy = sum(i * j for i, j in zip(x, vazoes))
     sum_x_quad = sum(i**2 for i in x)
     
     denominador = (n * sum_x_quad) - (sum_x ** 2)
-    if denominador == 0:
-        return 0.0
-        
+    if denominador == 0: return 0.0
     return ((n * sum_xy) - (sum_x * sum_y)) / denominador
 
-# <-------------------------------------------------------------> #
+
+def escolher_qualidade(vazao_medida: float, buffer_atual: float, tendencia: float, jitter_suavizado: float) -> tuple[str, int]:
+    global qualidades, bitrates
+
+    qualidade_escolhida = qualidades[0]
+    rate_escolhido = bitrates[0]
+    
+    # 1. Cálculo base de Throughput exigido pelo professor
+    available = vazao_medida * config["fator_de_seguranca"]
+
+    # 2. Heurística Híbrida (Buffer + Tendência + Jitter)
+    # Se o tanque estiver na meta ou acima, somos otimistas (Bônus de 10%)
+    if buffer_atual >= config["buffer_target_s"]:
+        available *= 1.10
+    # Se estiver quase zerando, modo de segurança máximo (Corte de 30%)
+    elif buffer_atual <= config["buffer_min_s"]:
+        available *= 0.70 
+
+    # Punição por tendência de queda brusca
+    if tendencia < -100.0: available *= 0.80
+    elif tendencia < -10.0: available *= 0.90
+        
+    # Punição explícita por atraso caótico (Jitter EWMA Alto)
+    if jitter_suavizado > 100.0: available *= 0.75
+
+    # Logs de depuração exigidos para comprovar a seleção
+    print_log(f"\tThroughput médio: {vazao_medida:.0f} kbps")
+    print_log(f"\tDisponível (com Híbrida): {available:.0f} kbps")
+
+    for rate, quality in qualities_rates.items():
+        if available >= rate:
+            qualidade_escolhida, rate_escolhido = quality, rate
+
+    print_log(f"\tQualidade selecionada: {qualidade_escolhida} ({rate_escolhido} kbps)")
+    return (qualidade_escolhida, rate_escolhido)
 
 
 # --------------------------------------------------------------- #
-#           Inicialização
+#           Inicialização e Estado
 # --------------------------------------------------------------- #
 
-# Mapeamento das qualidades e bitrates
 qualities_rates: dict[int, str] = {}
 for rep in representacoes:
     qualities_rates[rep["bitrate_kbps"]] = rep["quality"]
@@ -121,82 +111,32 @@ for rep in representacoes:
 bitrates = list(qualities_rates.keys())
 qualidades = list(qualities_rates.values())
 
-# Mapeamento dos servidores para failover
 servidores = [s for s in sorted(manifesto["servers"], key=lambda server: server["priority"])]
 for servidor in servidores:
-    servidor["url"] = servidor["url"].split("://")[1] # Tirar 'https://'
+    servidor["url"] = servidor["url"].split("://")[1] 
     servidor.pop("bandwidth_kbps")
     servidor.pop("jitter_ms")
 
-print_log(f"Servidores disponíveis: {servidores}")
+print_log(f"Servidores disponíveis: {servidores}\n")
 
-# <-------------------------------------------------------------> #
+# Variáveis de Estado
+vazao_media = 1000.0                # Chute inicial conservador
+buffer = 0.0                        
+rebuffer_acumulado = 0.0            
+failover_total = 0                  
+index_servidor = 0                  
+ultimas_vazoes = []                 
+jitter_ewma = 0.0                   
+tendencia_rede = 0.0                
+segundos_por_segmento = float(manifesto["segment_duration_s"])
 
-
-# --------------------------------------------------------------- #
-#           Estado inicial do ABR
-# --------------------------------------------------------------- #
-
-# Teste inicial de bitrate
-def teste_bitrate(num_qualidade: int) -> int:
-
-    qualidade = representacoes[num_qualidade]["quality"]
-    n_bytes = representacoes[num_qualidade]["segment_bytes"]
-
-    conexao.request("GET", f"/segment/{qualidade}")
-    response = conexao.getresponse()
-
-    tempo_download = time.time()
-    response.read()
-    tempo_download = time.time() - tempo_download
-
-    return (8 * n_bytes / tempo_download) // 1000
-
-bitrate_teste = teste_bitrate(0)
-
-print_log(f"Bitrate do teste: {bitrate_teste} kbps\n")
-
-# Parametros
-segundos_por_segmento:float = manifesto["segment_duration_s"]
-tamanho_janela_media = config["janela_da_media"]
-
-qualidade_atual = escolher_qualidade(bitrate_teste, 0.0, 0.0, 0.0)
-vazao_media = bitrate_teste
-
-print_log(f"Primeira Qualidade | Bitrate escolhida: {qualidade_atual[0]} | {qualidade_atual[1]} kbps\n\n")
-
-# Logs
 logs_csv = {
-    "segment": [],
-    "timestamp": [],
-    "server_id": [],
-    "quality": [],
-    "bitrate_kbps": [],
-    "vazao_kbps": [],
-    "download_time_s": [],
-    "jitter_network_ms": [],
-    "jitter_ewma_ms": [],
-    "buffer_level_s": [],
-    "buffer_can_play": [],
-    "rebuffer_event": [],
-    "stall_duration_s": [],
+    "segment": [], "timestamp": [], "server_id": [], "quality": [],
+    "bitrate_kbps": [], "vazao_kbps": [], "download_time_s": [],
+    "jitter_network_ms": [], "jitter_ewma_ms": [], "buffer_level_s": [],
+    "buffer_can_play": [], "rebuffer_event": [], "stall_duration_s": [],
     "failover_total": [],
 }
-logs_vazao_media = [] # p/ graficos
-
-# Estado
-index_servidor = 0                  # Index do servidor conectado atualmente (da lista de servidores)
-ultimas_vazoes = []                 # vazoes instantaneas recentes p/ calcular media
-buffer = 0.0                        # segundos em buffer
-rebuffer_acumulado = 0.0            # tempo acumulado de rebuffer
-failover_total = 0                  # número acumulado de failovers
-rebuffer_no_ultimo = False          # se teve rebuffer no ultimo segmento
-ultimo_tempo_download = None        # Para cálculo do Jitter
-ultimo_tempo_atual = time.time()    # medição do tempo real para medir o tempo decorrido
-jitter_ewma = 0.0                   # Estado inicial do Jitter EWMA
-tendencia_rede = 0.0                # Estado inicial da inclinação de tendência
-
-# <-------------------------------------------------------------> #
 
 
 # --------------------------------------------------------------- #
@@ -206,20 +146,11 @@ tendencia_rede = 0.0                # Estado inicial da inclinação de tendênc
 SIMULAR_FALHA = True
 SEGMENTO_FALHA = 10
 falha_ja_ocorreu = False
-tempo_failover_ms = 0.0
 
 def baixar_segmento(qualidade):
+    global conexao, segmento, index_servidor, falha_ja_ocorreu
 
-    global conexao, segmento, index_servidor
-    global falha_ja_ocorreu
-
-    # SIMULAÇÃO DE QUEDA DO SERVIDOR A
-    if (
-        SIMULAR_FALHA
-        and segmento == SEGMENTO_FALHA
-        and index_servidor == 0
-        and not falha_ja_ocorreu
-    ):
+    if SIMULAR_FALHA and segmento == SEGMENTO_FALHA and index_servidor == 0 and not falha_ja_ocorreu:
         falha_ja_ocorreu = True
         raise OSError("Servidor A indisponível (SIMULAÇÃO)")
 
@@ -227,8 +158,6 @@ def baixar_segmento(qualidade):
     response = conexao.getresponse()
 
     inicio = time.perf_counter()
-    
-    # Leitura segmentada (chunks) para aferição de Jitter intra-segmento
     chunk_size = 8192
     dados = bytearray()
     tempos_chunks = []
@@ -236,8 +165,7 @@ def baixar_segmento(qualidade):
     ultimo_tempo = time.perf_counter()
     while True:
         chunk = response.read(chunk_size)
-        if not chunk:
-            break
+        if not chunk: break
         agora = time.perf_counter()
         tempos_chunks.append(agora - ultimo_tempo)
         ultimo_tempo = agora
@@ -245,7 +173,6 @@ def baixar_segmento(qualidade):
         
     tempo_download = time.perf_counter() - inicio
 
-    # Cálculo de Jitter (Média da variação de atraso entre chunks)
     jitter_ms = 0.0
     if len(tempos_chunks) > 1:
         diferencas = [abs(tempos_chunks[i] - tempos_chunks[i-1]) for i in range(1, len(tempos_chunks))]
@@ -253,66 +180,72 @@ def baixar_segmento(qualidade):
 
     return bytes(dados), tempo_download, jitter_ms
 
-def calcular_media(vazao_atual:float)->float:
-    global logs_csv, tamanho_janela_media, ultimas_vazoes
-
-    ultimas_vazoes.append(vazao_atual)
-    if len(ultimas_vazoes) > tamanho_janela_media:
-        ultimas_vazoes.pop(0)
-
-    return sum(ultimas_vazoes) / len(ultimas_vazoes)
-
 
 segmentos = range(1, config["num_segmentos"]+1)
 n_servidores = len(servidores)
+
 for segmento in segmentos:
+    print_log(f"\n>> Segmento {segmento}")
 
-    print_log(f">> Segmento {segmento}")
-
-
-    # Mecanismo de Failover
     for tentativa in range(n_servidores):
-
-        # checar saúde do servidor da tentativa
-        conexao_health = http.client.HTTPConnection(servidores[tentativa]["url"])
-        conexao_health.request("GET", "/health")
-        response = conexao_health.getresponse()
-        health = json.loads(response.read())
-        conexao_health.close()
-
-        if health["status"] != "ok":
-            print(f"\tServidor de prioridade {tentativa+1} inacessível.")
-            continue
-
-        # Se o servidor da tentativa estiver saudavel e for mais prioritario que o atual, reestabelece conexao com o prioritario
-        elif index_servidor > tentativa:
-            conexao.close()
-            conexao = http.client.HTTPConnection(servidores[tentativa]["url"])
-            index_servidor = tentativa
-            print_log(f"   Conexão com servidor de maior prioridade (prioridade {tentativa}) reestabelecida.")
-
-
-        temp = servidores[index_servidor]["url"]
-        print_log(f"   Tentativa {tentativa+1} no servidor {temp}")
-
         try:
+            # Saúde da conexão
+            conexao_health = http.client.HTTPConnection(servidores[tentativa]["url"])
+            conexao_health.request("GET", "/health")
+            health = json.loads(conexao_health.getresponse().read())
+            conexao_health.close()
 
+            if health["status"] != "ok":
+                print(f"\tServidor prio {tentativa} inacessível.")
+                raise HTTPException
+                
+            elif index_servidor > tentativa:
+                conexao.close()
+                conexao = http.client.HTTPConnection(servidores[tentativa]["url"])
+                index_servidor = tentativa
+
+            # Tomada de decisão
             qualidade, bitrate_escolhida = escolher_qualidade(vazao_media, buffer, tendencia_rede, jitter_ewma)
-            print_log(f"\tQualidade escolhida: {qualidade} | {bitrate_escolhida} kbps")
-
+            
+            # Download
             dados, tempo_download, jitter_rede = baixar_segmento(qualidade)
-
-            # Vazão Atual
             vazao_atual = (8 * len(dados) / tempo_download) / 1000
+            
+            # Atualização do modelo preditivo (Média Janela = 3)
+            ultimas_vazoes.append(vazao_atual)
+            if len(ultimas_vazoes) > config["janela_da_media"]: ultimas_vazoes.pop(0)
+            vazao_media = sum(ultimas_vazoes) / len(ultimas_vazoes)
 
-            print_log(f"\tVazão Atual: {vazao_atual:.2f} kbps")
+            # --- ATUALIZAÇÃO DO BUFFER E SIMULAÇÃO DE PLAYBACK (ENTREGA 2) ---
+            tempo_rebuffer = 0.0
+            buffer_can_play = True
+            
+            # 1. Player consumiu vídeo DURANTE o tempo de download
+            if tempo_download > buffer:
+                tempo_rebuffer = tempo_download - buffer
+                buffer = 0.0
+                rebuffer_acumulado += tempo_rebuffer
+                buffer_can_play = False
+                print_log(f"\t<!> REBUFFERING: Travou por {tempo_rebuffer:.2f}s")
+            else:
+                buffer -= tempo_download
 
-            # Cálculo da média
-            vazao_media = calcular_media(vazao_atual)
-            logs_vazao_media.append(vazao_media)
+            # 2. Novo segmento chegou e foi adicionado
+            buffer += segundos_por_segmento
 
-            print_log(f"\tVazão média: {vazao_media:.2f} kbps")
-            print_log(f"\tJitter da Rede: {jitter_rede:.2f} ms")
+            # 3. Pacing (time.sleep): Simula o limite físico do player.
+            # Se já atingimos o alvo de 15s, ativamos o sleep para estabilizar e não baixar desenfreadamente.
+            if buffer >= config["buffer_target_s"]:
+                wait = max(0.0, segundos_por_segmento - tempo_download)
+                if wait > 0:
+                    print_log(f"\t[Pacing] Pausa de {wait:.2f}s para simular playback (Buffer Alvo Atingido)")
+                    time.sleep(wait)
+                    buffer -= wait
+                    buffer = max(0.0, buffer)
+
+            # 4. Teto absoluto de segurança
+            buffer = min(config["buffer_max_s"], buffer)
+            # -----------------------------------------------------------------
 
             # Processamento Estatístico
             if segmento == 1:
@@ -320,96 +253,40 @@ for segmento in segmentos:
             else:
                 alpha = config["alpha_ewma"]
                 jitter_ewma = (alpha * jitter_rede) + ((1.0 - alpha) * jitter_ewma)
-            
             tendencia_rede = calcular_tendencia(ultimas_vazoes)
 
-            # Jitter (ms) antigo mantido para retrocompatibilidade do log
-            jitter = 0.0
-            if ultimo_tempo_download is not None:
-                jitter = 1000 * abs(tempo_download - ultimo_tempo_download)
-            ultimo_tempo_download = tempo_download
-            
-            # Tempo decorrido desde o último segmento
-            tempo_decorrido = time.time() - ultimo_tempo_atual
-            ultimo_tempo_atual = time.time()
+            print_log(f"\tBuffer atual: {buffer:.2f}s | Rebuffer total: {rebuffer_acumulado:.2f}s")
 
-            tempo_rebuffer = 0.0                            # Tempo de rebuffer nesse segmento
-            buffer_can_play = buffer >= tempo_decorrido     # Verifica se consegue manter o play contínuo naquele instante
-
-            # Verificar continuidade do player
-            if rebuffer_no_ultimo:
-                # Despausar
-                if buffer >= config["min_buffer_play"]:
-                    buffer -= tempo_decorrido
-                    rebuffer_no_ultimo = False
-                    pass
-
-                # Continua em rebuffer
-                else:
-                    tempo_rebuffer = tempo_decorrido
-                    rebuffer_acumulado += tempo_rebuffer
-                    rebuffer_no_ultimo = True
-                    print("\t<!> STILL REBUFFERING")
-                    pass
-            else:
-                # Play continuo
-                if buffer_can_play:
-                    buffer -= tempo_decorrido
-                    rebuffer_no_ultimo = False
-
-                # Travou agora
-                else:
-                    tempo_rebuffer = tempo_decorrido - buffer
-                    rebuffer_acumulado += tempo_rebuffer
-                    buffer = 0.0  # buffer esgotado
-                    rebuffer_no_ultimo = True
-                    print("\t<!> REBUFFERING")
-
-            buffer += segundos_por_segmento
-
-            print_log(f"\tBuffer atual: {buffer:.2f}s | Rebuffer acumulado: {rebuffer_acumulado:.2f}s")
-
-
-            print_log(f"   Tentativa bem sucedida!\n")
-            id_servidor = servidores[tentativa]["id"]
-
+            # Logs p/ CSV
             timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
             logs_csv["segment"].append(segmento)
             logs_csv["timestamp"].append(timestamp)
             logs_csv["server_id"].append(servidores[index_servidor]["id"])
             logs_csv["quality"].append(qualidade)
             logs_csv["bitrate_kbps"].append(bitrate_escolhida)
-            logs_csv["vazao_kbps"].append(vazao_atual)
+            logs_csv["vazao_kbps"].append(round(vazao_atual, 2))
             logs_csv["download_time_s"].append(round(tempo_download, 4))
             logs_csv["jitter_network_ms"].append(round(jitter_rede, 4))
             logs_csv["jitter_ewma_ms"].append(round(jitter_ewma, 4))
-            logs_csv["buffer_level_s"].append(buffer)
+            logs_csv["buffer_level_s"].append(round(buffer, 2))
             logs_csv["buffer_can_play"].append(int(buffer_can_play))
-            logs_csv["rebuffer_event"].append(int(rebuffer_no_ultimo))
-            logs_csv["stall_duration_s"].append(tempo_rebuffer)
+            logs_csv["rebuffer_event"].append(1 if not buffer_can_play else 0)
+            logs_csv["stall_duration_s"].append(round(tempo_rebuffer, 2))
             logs_csv["failover_total"].append(failover_total)
 
             break
 
         except (HTTPException, OSError) as e:
-
-            # Registrar Failover
             failover_total += 1
-
-            # Troca de servidor
             if tentativa < n_servidores - 1:
-                print("   Tentativa falhou. Tentando próximo servidor...\n")
+                print_log("\tTentativa falhou. Failover para o próximo servidor...")
                 conexao.close()
                 conexao = http.client.HTTPConnection(servidores[tentativa+1]["url"])
                 index_servidor = tentativa+1
-
             else:
-                print("<!> Sem servidores disponíveis. Encerrando...\n\n")
-                raise RuntimeError
+                raise RuntimeError("<!> Sem servidores disponíveis. Encerrando.")
 
-# <-------------------------------------------------------------> #
 conexao.close()
-
 
 # --------------------------------------------------------------- #
 #           Métricas CSV
@@ -417,14 +294,8 @@ conexao.close()
 
 csv_file = open("metricas_tarefa3.csv", "w", newline="", encoding="utf-8")
 writer = csv.writer(csv_file)
-
-# headers
 writer.writerow(list(logs_csv.keys()))
-
 for i in segmentos:
-    linha = []
-    for coluna in logs_csv.values():
-        linha.append(coluna[i-1])
+    linha = [coluna[i-1] for coluna in logs_csv.values()]
     writer.writerow(linha)
-
 csv_file.close()
